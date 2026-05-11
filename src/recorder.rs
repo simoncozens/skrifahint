@@ -1,19 +1,22 @@
 use std::collections::BTreeSet;
 
-use skrifa::GlyphId;
+use skrifa::{
+    outline::autohint::{Dimension, EdgeAction, GlyphStyle, PointAction, TopoFlags},
+    GlyphId,
+};
 
 use crate::{
     bytecode::Bytecode,
     control::CONTROL_DELTA_PPEM_MIN,
     control_index::ControlIndex,
     font::Font,
-    glyf::{extract_unscaled_outline, ScaledGlyph},
+    glyf::{extract_unscaled_outline, Action, ExportedHintPlan, ExportedHintRecord, ScaledGlyph},
     loader::{build_subglyph_shifter_bytecode, LoaderGlyphInfo, LoaderGlyphKind},
     opcodes::*,
+    style::STYLE_INDEX_UNASSIGNED,
     variations::has_stable_hint_plan_across_variations,
     AutohintError,
 };
-use skrifa::outline::{ExportedHintPlan, ExportedHintRecord};
 use write_fonts::types::F2Dot14;
 
 use crate::style::{StyleIndex, STYLE_COUNT};
@@ -105,7 +108,7 @@ struct RustRecorder<'a> {
     replay_segment_edge_raw: Vec<u16>,
     replay_edge_first_raw: Vec<u16>,
     replay_edge_serif_raw: Vec<u16>,
-    replay_edge_flags: Vec<u8>,
+    replay_edge_flags: Vec<TopoFlags>,
     replay_edge_best_blue_idx: Vec<u16>,
     replay_edge_best_blue_is_shoot: Vec<bool>,
     wrap_around_segments: Vec<u16>,
@@ -409,7 +412,7 @@ impl<'a> RustRecorder<'a> {
         count
     }
 
-    fn edge_flags_by_idx(&self, edge_idx: u16) -> Option<u8> {
+    fn edge_flags_by_idx(&self, edge_idx: u16) -> Option<TopoFlags> {
         self.replay_edge_flags.get(edge_idx as usize).copied()
     }
 
@@ -747,7 +750,7 @@ fn recorder_reset_hints_record(recorder: &mut RustRecorder) {
 #[allow(clippy::too_many_arguments)]
 fn marshal_action_fields(
     recorder: &RustRecorder,
-    action: u32,
+    action: Action,
     arg1_edge_idx: u16,
     arg2_edge_idx: u16,
     arg3_edge_idx: u16,
@@ -756,20 +759,6 @@ fn marshal_action_fields(
     cvt_blue_refs_offset: u16,
     cvt_blue_shoots_offset: u16,
 ) -> Option<RecorderMarshaledAction> {
-    const TA_EDGE_ROUND: u8 = 1 << 0;
-    const TA_EDGE_SERIF: u8 = 1 << 1;
-
-    const TA_BLUE: u32 = 4;
-    const TA_BLUE_ANCHOR: u32 = 5;
-    const TA_ANCHOR: u32 = 6;
-    const TA_ADJUST: u32 = 10;
-    const TA_LINK: u32 = 22;
-    const TA_STEM: u32 = 26;
-    const TA_SERIF: u32 = 38;
-    const TA_SERIF_ANCHOR: u32 = 45;
-    const TA_SERIF_LINK1: u32 = 52;
-    const TA_SERIF_LINK2: u32 = 59;
-
     let mut m = RecorderMarshaledAction::default();
 
     let maybe_bound_first_idx = |edge_idx: u16| -> u16 {
@@ -781,44 +770,44 @@ fn marshal_action_fields(
     };
 
     match action {
-        TA_LINK => {
+        Action::Edge(EdgeAction::Link) => {
             let base_flags = recorder.edge_flags_by_idx(arg1_edge_idx)?;
             let stem_flags = recorder.edge_flags_by_idx(arg2_edge_idx)?;
 
             m.edge1_first_idx = recorder.edge_first_mapped_segment_index(arg1_edge_idx);
             m.edge2_first_idx = recorder.edge_first_mapped_segment_index(arg2_edge_idx);
-            m.primary_is_round = (base_flags & TA_EDGE_ROUND) != 0;
-            m.secondary_is_serif = (stem_flags & TA_EDGE_SERIF) != 0;
+            m.primary_is_round = base_flags.contains(TopoFlags::ROUND);
+            m.secondary_is_serif = stem_flags.contains(TopoFlags::SERIF);
             m.segment_edge_indices[0] = arg2_edge_idx;
             m.num_segment_edges = 1;
         }
 
-        TA_ANCHOR => {
+        Action::Edge(EdgeAction::Anchor) => {
             let edge_flags = recorder.edge_flags_by_idx(arg1_edge_idx)?;
             let edge2_flags = recorder.edge_flags_by_idx(arg2_edge_idx)?;
 
             m.edge1_first_idx = recorder.edge_first_mapped_segment_index(arg1_edge_idx);
             m.edge2_first_idx = recorder.edge_first_mapped_segment_index(arg2_edge_idx);
-            m.primary_is_round = (edge_flags & TA_EDGE_ROUND) != 0;
-            m.secondary_is_serif = (edge2_flags & TA_EDGE_SERIF) != 0;
+            m.primary_is_round = edge_flags.contains(TopoFlags::ROUND);
+            m.secondary_is_serif = edge2_flags.contains(TopoFlags::SERIF);
             m.segment_edge_indices[0] = arg1_edge_idx;
             m.num_segment_edges = 1;
         }
 
-        TA_ADJUST => {
+        Action::Edge(EdgeAction::Adjust) => {
             let edge_flags = recorder.edge_flags_by_idx(arg1_edge_idx)?;
             let edge2_flags = recorder.edge_flags_by_idx(arg2_edge_idx)?;
 
             m.edge1_first_idx = recorder.edge_first_mapped_segment_index(arg1_edge_idx);
             m.edge2_first_idx = recorder.edge_first_mapped_segment_index(arg2_edge_idx);
             m.edge3_first_idx = maybe_bound_first_idx(lower_bound_edge_idx);
-            m.primary_is_round = (edge_flags & TA_EDGE_ROUND) != 0;
-            m.secondary_is_serif = (edge2_flags & TA_EDGE_SERIF) != 0;
+            m.primary_is_round = edge_flags.contains(TopoFlags::ROUND);
+            m.secondary_is_serif = edge2_flags.contains(TopoFlags::SERIF);
             m.segment_edge_indices[0] = arg1_edge_idx;
             m.num_segment_edges = 1;
         }
 
-        TA_BLUE_ANCHOR => {
+        Action::Edge(EdgeAction::BlueAnchor) => {
             let best_blue_idx = recorder.edge_best_blue_idx_by_idx(arg1_edge_idx)?;
             m.edge1_first_idx = recorder.edge_first_mapped_segment_index(arg1_edge_idx);
             m.edge2_first_idx = recorder.edge_first_mapped_segment_index(arg2_edge_idx);
@@ -831,21 +820,21 @@ fn marshal_action_fields(
             m.num_segment_edges = 1;
         }
 
-        TA_STEM => {
+        Action::Edge(EdgeAction::Stem) => {
             let edge_flags = recorder.edge_flags_by_idx(arg1_edge_idx)?;
             let edge2_flags = recorder.edge_flags_by_idx(arg2_edge_idx)?;
 
             m.edge1_first_idx = recorder.edge_first_mapped_segment_index(arg1_edge_idx);
             m.edge2_first_idx = recorder.edge_first_mapped_segment_index(arg2_edge_idx);
             m.edge3_first_idx = maybe_bound_first_idx(lower_bound_edge_idx);
-            m.primary_is_round = (edge_flags & TA_EDGE_ROUND) != 0;
-            m.secondary_is_serif = (edge2_flags & TA_EDGE_SERIF) != 0;
+            m.primary_is_round = edge_flags.contains(TopoFlags::ROUND);
+            m.secondary_is_serif = edge2_flags.contains(TopoFlags::SERIF);
             m.segment_edge_indices[0] = arg1_edge_idx;
             m.segment_edge_indices[1] = arg2_edge_idx;
             m.num_segment_edges = 2;
         }
 
-        TA_BLUE => {
+        Action::Edge(EdgeAction::Blue) => {
             let best_blue_idx = recorder.edge_best_blue_idx_by_idx(arg1_edge_idx)?;
 
             m.edge1_first_idx = recorder.edge_first_mapped_segment_index(arg1_edge_idx);
@@ -858,7 +847,7 @@ fn marshal_action_fields(
             m.num_segment_edges = 1;
         }
 
-        TA_SERIF => {
+        Action::Edge(EdgeAction::Serif) => {
             let base_edge_idx = recorder.edge_serif_idx_by_idx(arg1_edge_idx)?;
             if base_edge_idx == 0xFFFF {
                 return None;
@@ -872,7 +861,7 @@ fn marshal_action_fields(
             m.num_segment_edges = 1;
         }
 
-        TA_SERIF_ANCHOR | TA_SERIF_LINK2 => {
+        Action::Edge(EdgeAction::SerifAnchor) | Action::Edge(EdgeAction::SerifLink2) => {
             recorder.edge_flags_by_idx(arg1_edge_idx)?;
 
             m.edge1_first_idx = recorder.edge_first_mapped_segment_index(arg1_edge_idx);
@@ -882,7 +871,7 @@ fn marshal_action_fields(
             m.num_segment_edges = 1;
         }
 
-        TA_SERIF_LINK1 => {
+        Action::Edge(EdgeAction::SerifLink1) => {
             if recorder.edge_flags_by_idx(arg1_edge_idx).is_none()
                 || recorder.edge_flags_by_idx(arg2_edge_idx).is_none()
                 || recorder.edge_flags_by_idx(arg3_edge_idx).is_none()
@@ -908,7 +897,7 @@ fn marshal_action_fields(
 #[allow(clippy::too_many_arguments)]
 fn hints_recorder_marshal_and_emit_action(
     recorder: &RustRecorder,
-    action: u32,
+    action: Action,
     arg1_edge_idx: u16,
     arg2_edge_idx: u16,
     arg3_edge_idx: u16,
@@ -997,23 +986,7 @@ fn recorder_replay_process_hint_record(
     cvt_blue_shoots_offset: u16,
     top_to_bottom_hinting: bool,
 ) -> Result<ReplayProcessResult, AutohintError> {
-    const TA_DIMENSION_VERT: u8 = 1;
-    const TA_IP_BEFORE: u8 = 0;
-    const TA_IP_AFTER: u8 = 1;
-    const TA_IP_ON: u8 = 2;
-    const TA_IP_BETWEEN: u8 = 3;
-    const TA_BLUE: u8 = 4;
-    const TA_ANCHOR: u8 = 6;
-    const TA_ADJUST: u8 = 10;
-    const TA_LINK: u8 = 22;
-    const TA_STEM: u8 = 26;
-    const TA_SERIF: u8 = 38;
-    const TA_SERIF_ANCHOR: u8 = 45;
-    const TA_SERIF_LINK1: u8 = 52;
-    const TA_SERIF_LINK2: u8 = 59;
-    const TA_BOUND: u8 = 66;
-
-    if rec.dim != TA_DIMENSION_VERT {
+    if rec.dim != Dimension::Vertical {
         return Ok(ReplayProcessResult {
             bytecode: Bytecode::new(),
             did_emit_action: false,
@@ -1038,7 +1011,7 @@ fn recorder_replay_process_hint_record(
     };
 
     match rec.action {
-        TA_IP_BEFORE => {
+        Action::Point(PointAction::IpBefore) => {
             if point_valid {
                 recorder.ip_before_points.insert(rec.point_ix);
             }
@@ -1047,7 +1020,7 @@ fn recorder_replay_process_hint_record(
                 did_emit_action: false,
             });
         }
-        TA_IP_AFTER => {
+        Action::Point(PointAction::IpAfter) => {
             if point_valid {
                 recorder.ip_after_points.insert(rec.point_ix);
             }
@@ -1056,7 +1029,7 @@ fn recorder_replay_process_hint_record(
                 did_emit_action: false,
             });
         }
-        TA_IP_ON => {
+        Action::Point(PointAction::IpOn) => {
             if point_valid && edge_valid {
                 recorder.ip_on_points.insert(RecorderOnPoint {
                     edge: rec.edge_ix,
@@ -1068,7 +1041,7 @@ fn recorder_replay_process_hint_record(
                 did_emit_action: false,
             });
         }
-        TA_IP_BETWEEN => {
+        Action::Point(PointAction::IpBetween) => {
             if point_valid && edge_valid && edge2_valid {
                 recorder.ip_between_points.insert(RecorderBetweenPoint {
                     before_edge: rec.edge_ix,
@@ -1081,7 +1054,7 @@ fn recorder_replay_process_hint_record(
                 did_emit_action: false,
             });
         }
-        TA_BLUE => {
+        Action::Edge(EdgeAction::Blue) => {
             if !edge_valid || !edge2_valid {
                 return Ok(ReplayProcessResult {
                     bytecode: Bytecode::new(),
@@ -1089,7 +1062,10 @@ fn recorder_replay_process_hint_record(
                 });
             }
         }
-        TA_ANCHOR | TA_ADJUST | TA_LINK | TA_STEM => {
+        Action::Edge(EdgeAction::Anchor)
+        | Action::Edge(EdgeAction::Adjust)
+        | Action::Edge(EdgeAction::Link)
+        | Action::Edge(EdgeAction::Stem) => {
             if !edge_valid || !edge2_valid {
                 return Ok(ReplayProcessResult {
                     bytecode: Bytecode::new(),
@@ -1097,7 +1073,9 @@ fn recorder_replay_process_hint_record(
                 });
             }
         }
-        TA_SERIF | TA_SERIF_ANCHOR | TA_SERIF_LINK2 => {
+        Action::Edge(EdgeAction::Serif)
+        | Action::Edge(EdgeAction::SerifAnchor)
+        | Action::Edge(EdgeAction::SerifLink2) => {
             if !edge_valid {
                 return Ok(ReplayProcessResult {
                     bytecode: Bytecode::new(),
@@ -1105,7 +1083,7 @@ fn recorder_replay_process_hint_record(
                 });
             }
         }
-        TA_SERIF_LINK1 => {
+        Action::Edge(EdgeAction::SerifLink1) => {
             if !edge_valid || !edge2_valid || !edge3_valid {
                 return Ok(ReplayProcessResult {
                     bytecode: Bytecode::new(),
@@ -1113,7 +1091,7 @@ fn recorder_replay_process_hint_record(
                 });
             }
         }
-        TA_BOUND => {
+        Action::Edge(EdgeAction::Bound) => {
             return Ok(ReplayProcessResult {
                 bytecode: Bytecode::new(),
                 did_emit_action: false,
@@ -1129,7 +1107,7 @@ fn recorder_replay_process_hint_record(
 
     let emitted = hints_recorder_marshal_and_emit_action(
         recorder,
-        rec.action as u32,
+        rec.action,
         rec.edge_ix,
         rec.edge2_ix,
         rec.edge3_ix,
@@ -1154,8 +1132,7 @@ fn recorder_record_hints_for_ppem(
     glyph_num_points: u32,
     ppem: u16,
     ta_style: StyleIndex,
-    is_non_base: bool,
-    is_digit: bool,
+    style: GlyphStyle,
     coords: &[F2Dot14],
 ) -> Result<(), AutohintError> {
     // Reset the hints-record accumulator for this ppem
@@ -1165,15 +1142,7 @@ fn recorder_record_hints_for_ppem(
         recorder.hints_record_num_actions = 0;
     }
 
-    let rust_plan = crate::glyf::compute_hint_plan(
-        font,
-        glyph_idx,
-        ta_style.as_usize(),
-        is_non_base as u8,
-        is_digit as u8,
-        ppem,
-        coords,
-    )?;
+    let rust_plan = crate::glyf::compute_hint_plan(font, glyph_idx, style, ppem, coords)?;
 
     if !recorder_build_replay_axis_from_plan(recorder, &rust_plan) {
         return Err(AutohintError::OutOfMemory);
@@ -1506,8 +1475,7 @@ fn append_hints_or_scaler_bytecode(
     idx: GlyphId,
     glyph_num_points: u32,
     ta_style: StyleIndex,
-    is_non_base: bool,
-    is_digit: bool,
+    glyph_style: GlyphStyle,
     bytecode: &mut Bytecode,
 ) -> Result<bool, AutohintError> {
     let mut recorder = RustRecorder::new(glyph_ref);
@@ -1528,8 +1496,7 @@ fn append_hints_or_scaler_bytecode(
             glyph_num_points,
             size as u16,
             ta_style,
-            is_non_base,
-            is_digit,
+            glyph_style,
             &[],
         )?;
 
@@ -1680,7 +1647,8 @@ pub(crate) fn build_glyph_instructions(font: &mut Font, idx: GlyphId) -> Result<
         log_debug_heading(&format!("glyph {}", idx), '=');
     }
 
-    let ta_style = StyleIndex::new(gstyle.style_index as usize)?;
+    let ta_style =
+        StyleIndex::new(gstyle.style_index().unwrap_or(STYLE_INDEX_UNASSIGNED) as usize)?;
     let use_gstyle_data;
 
     let (is_composite_glyph, is_empty_glyph, glyph_num_points) =
@@ -1704,13 +1672,7 @@ pub(crate) fn build_glyph_instructions(font: &mut Font, idx: GlyphId) -> Result<
     }
 
     let mut unstable_variable_plan = if font.is_variable() && !is_composite_glyph {
-        !has_stable_hint_plan_across_variations(
-            font,
-            idx,
-            ta_style,
-            gstyle.is_non_base,
-            gstyle.is_digit,
-        )?
+        !has_stable_hint_plan_across_variations(font, idx, gstyle)?
     } else {
         false
     };
@@ -1763,8 +1725,7 @@ pub(crate) fn build_glyph_instructions(font: &mut Font, idx: GlyphId) -> Result<
             idx,
             glyph_num_points,
             ta_style,
-            gstyle.is_non_base,
-            gstyle.is_digit,
+            gstyle,
             &mut bytecode,
         )?;
     }
@@ -1777,7 +1738,7 @@ pub(crate) fn build_glyph_instructions(font: &mut Font, idx: GlyphId) -> Result<
         bytecode.extend(emitted);
     }
 
-    if use_gstyle_data && gstyle.is_non_base {
+    if use_gstyle_data && gstyle.is_non_base() {
         glyph_ref.append_ignore_std_width();
         bytecode.extend_bytes(&[PUSHB_2, CvtLocations::cvtl_ignore_std_width as u8, 0, WCVTP]);
     }
@@ -2073,21 +2034,11 @@ fn build_glyph_segments_bytecode(
 }
 
 fn emit_action_header(
-    action: u32,
+    action: Action,
     marshaled: &RecorderMarshaledAction,
     top_to_bottom_hinting: bool,
 ) -> Result<Vec<u8>, AutohintError> {
     // Must match the C TA_Action enum base-variant values (see tahints.h).
-    const TA_BLUE: u32 = 4;
-    const TA_BLUE_ANCHOR: u32 = 5;
-    const TA_ANCHOR: u32 = 6;
-    const TA_ADJUST: u32 = 10;
-    const TA_LINK: u32 = 22;
-    const TA_STEM: u32 = 26;
-    const TA_SERIF: u32 = 38;
-    const TA_SERIF_ANCHOR: u32 = 45;
-    const TA_SERIF_LINK1: u32 = 52;
-    const TA_SERIF_LINK2: u32 = 59;
 
     const ACTION_OFFSET: u8 = FunctionNumbers::bci_action_ip_before as u8;
 
@@ -2101,8 +2052,8 @@ fn emit_action_header(
     buf.push(0);
 
     match action {
-        TA_LINK => {
-            let action_byte = (TA_LINK as u8)
+        Action::Edge(EdgeAction::Link) => {
+            let action_byte = action.to_opcode()
                 + ACTION_OFFSET
                 + (marshaled.secondary_is_serif as u8)
                 + 2 * (marshaled.primary_is_round as u8);
@@ -2111,8 +2062,8 @@ fn emit_action_header(
             push_u16(&mut buf, marshaled.edge2_first_idx);
         }
 
-        TA_ANCHOR => {
-            let action_byte = (TA_ANCHOR as u8)
+        Action::Edge(EdgeAction::Anchor) => {
+            let action_byte = action.to_opcode()
                 + ACTION_OFFSET
                 + (marshaled.secondary_is_serif as u8)
                 + 2 * (marshaled.primary_is_round as u8);
@@ -2121,10 +2072,10 @@ fn emit_action_header(
             push_u16(&mut buf, marshaled.edge2_first_idx);
         }
 
-        TA_ADJUST => {
+        Action::Edge(EdgeAction::Adjust) => {
             let has_bound = (marshaled.edge3_first_idx != 0xFFFF) as u8;
             let bound_and_down = 4 * has_bound + 4 * (has_bound * (top_to_bottom_hinting as u8));
-            let action_byte = (TA_ADJUST as u8)
+            let action_byte = action.to_opcode()
                 + ACTION_OFFSET
                 + (marshaled.secondary_is_serif as u8)
                 + 2 * (marshaled.primary_is_round as u8)
@@ -2137,17 +2088,18 @@ fn emit_action_header(
             }
         }
 
-        TA_BLUE_ANCHOR => {
-            buf.push((TA_BLUE_ANCHOR as u8) + ACTION_OFFSET);
+        Action::Edge(EdgeAction::BlueAnchor) => {
+            let action_byte = action.to_opcode() + ACTION_OFFSET;
+            buf.push(action_byte);
             push_u16(&mut buf, marshaled.edge2_first_idx);
             push_u16(&mut buf, marshaled.cvt_idx);
             push_u16(&mut buf, marshaled.edge1_first_idx);
         }
 
-        TA_STEM => {
+        Action::Edge(EdgeAction::Stem) => {
             let has_bound = (marshaled.edge3_first_idx != 0xFFFF) as u8;
             let bound_and_down = 4 * has_bound + 4 * (has_bound * (top_to_bottom_hinting as u8));
-            let action_byte = (TA_STEM as u8)
+            let action_byte = action.to_opcode()
                 + ACTION_OFFSET
                 + (marshaled.secondary_is_serif as u8)
                 + 2 * (marshaled.primary_is_round as u8)
@@ -2160,19 +2112,20 @@ fn emit_action_header(
             }
         }
 
-        TA_BLUE => {
-            buf.push((TA_BLUE as u8) + ACTION_OFFSET);
+        Action::Edge(EdgeAction::Blue) => {
+            let action_byte = action.to_opcode() + ACTION_OFFSET;
+            buf.push(action_byte);
             push_u16(&mut buf, marshaled.cvt_idx);
             push_u16(&mut buf, marshaled.edge1_first_idx);
         }
 
-        TA_SERIF => {
+        Action::Edge(EdgeAction::Serif) => {
             let has_lower = (marshaled.lower_bound_first_idx != 0xFFFF) as u8;
             let has_upper = (marshaled.upper_bound_first_idx != 0xFFFF) as u8;
             let bound_and_down = has_lower
                 + 2 * has_upper
                 + 3 * ((has_lower | has_upper) * (top_to_bottom_hinting as u8));
-            let action_byte = (TA_SERIF as u8) + ACTION_OFFSET + bound_and_down;
+            let action_byte = action.to_opcode() + ACTION_OFFSET + bound_and_down;
             buf.push(action_byte);
             push_u16(&mut buf, marshaled.edge1_first_idx);
             push_u16(&mut buf, marshaled.edge2_first_idx);
@@ -2184,13 +2137,13 @@ fn emit_action_header(
             }
         }
 
-        TA_SERIF_ANCHOR | TA_SERIF_LINK2 => {
+        Action::Edge(EdgeAction::SerifAnchor) | Action::Edge(EdgeAction::SerifLink2) => {
             let has_lower = (marshaled.lower_bound_first_idx != 0xFFFF) as u8;
             let has_upper = (marshaled.upper_bound_first_idx != 0xFFFF) as u8;
             let bound_and_down = has_lower
                 + 2 * has_upper
                 + 3 * ((has_lower | has_upper) * (top_to_bottom_hinting as u8));
-            let action_byte = (action as u8) + ACTION_OFFSET + bound_and_down;
+            let action_byte = action.to_opcode() + ACTION_OFFSET + bound_and_down;
             buf.push(action_byte);
             push_u16(&mut buf, marshaled.edge1_first_idx);
             if has_lower != 0 {
@@ -2201,13 +2154,13 @@ fn emit_action_header(
             }
         }
 
-        TA_SERIF_LINK1 => {
+        Action::Edge(EdgeAction::SerifLink1) => {
             let has_lower = (marshaled.lower_bound_first_idx != 0xFFFF) as u8;
             let has_upper = (marshaled.upper_bound_first_idx != 0xFFFF) as u8;
             let bound_and_down = has_lower
                 + 2 * has_upper
                 + 3 * ((has_lower | has_upper) * (top_to_bottom_hinting as u8));
-            let action_byte = (TA_SERIF_LINK1 as u8) + ACTION_OFFSET + bound_and_down;
+            let action_byte = action.to_opcode() + ACTION_OFFSET + bound_and_down;
             buf.push(action_byte);
             push_u16(&mut buf, marshaled.edge1_first_idx);
             push_u16(&mut buf, marshaled.edge2_first_idx);
@@ -2290,7 +2243,7 @@ fn emit_segments_payload(
 }
 
 fn emit_marshaled_action_bytes(
-    action: u32,
+    action: Action,
     marshaled: &RecorderMarshaledAction,
     top_to_bottom_hinting: bool,
     segment_indices1: &[u16],

@@ -1,11 +1,11 @@
 use crate::{
     font::Font,
-    style::{GlyphStyle, StyleIndex, STYLE_INDEX_UNASSIGNED},
+    style::{StyleIndex, STYLE_INDEX_UNASSIGNED},
     AutohintError,
 };
 use indexmap::IndexMap;
 use skrifa::{
-    outline::{GlyphStyles, STYLE_CLASSES},
+    outline::autohint::{GlyphStyle, GlyphStyles, STYLE_CLASSES},
     raw::{
         tables::glyf::{Anchor, CompositeGlyphFlags, Glyph},
         TableProvider,
@@ -68,7 +68,7 @@ pub(crate) fn compute_style_coverage(
     face_index: i32,
     num_faces: i32,
 ) -> Result<(Vec<GlyphStyle>, IndexMap<StyleIndex, GlyphId>), AutohintError> {
-    let mut glyph_styles_out = vec![GlyphStyle::unassigned(); glyph_count];
+    let mut glyph_styles_out = vec![GlyphStyle::default(); glyph_count];
     let mut sample_glyphs_map: IndexMap<StyleIndex, GlyphId> = IndexMap::new();
 
     fn propagate_style_to_composites(
@@ -123,7 +123,7 @@ pub(crate) fn compute_style_coverage(
 
             let mut count = 0usize;
             for (idx, style) in glyph_styles.iter().enumerate() {
-                if style.style_index as usize == style_idx.as_usize() {
+                if style.style_index().unwrap_or(0xFFFF) as usize == style_idx.as_usize() {
                     if count.is_multiple_of(10) {
                         eprint!(" ");
                     }
@@ -178,17 +178,18 @@ pub(crate) fn compute_style_coverage(
 
     for (gid, style_out) in glyph_styles_out.iter_mut().enumerate() {
         let mut style_index = STYLE_INDEX_UNASSIGNED;
-        let is_non_base = styles.is_non_base(gid as u32);
-        let is_digit = styles.is_digit(gid as u32);
+        let style = styles.get((gid as u32).into()).unwrap_or_default();
+        let is_non_base = style.is_non_base();
+        let is_digit = style.is_digit();
 
-        if let Some(skrifa_style) = styles.style_index(gid as u32) {
-            style_index = skrifa_style as u16;
+        if let Some(skrifa_style) = style.style_index() {
+            style_index = skrifa_style;
             sample_glyphs_map
-                .entry(StyleIndex::new(skrifa_style)?)
+                .entry(StyleIndex::new(skrifa_style as usize)?)
                 .or_insert(GlyphId::new(gid as u32));
         }
 
-        *style_out = GlyphStyle::new(style_index, is_digit, is_non_base);
+        *style_out = GlyphStyle::from_raw_parts(style_index, is_non_base, is_digit);
     }
 
     for gid in 0..glyph_styles_out.len() {
@@ -203,7 +204,11 @@ pub(crate) fn compute_style_coverage(
     if fallback_style != STYLE_INDEX_UNASSIGNED {
         for style in glyph_styles_out.iter_mut() {
             if style.is_unassigned() {
-                *style = GlyphStyle::new(fallback_style, style.is_digit, style.is_non_base);
+                *style = GlyphStyle::from_raw_parts(
+                    fallback_style,
+                    style.is_non_base(),
+                    style.is_digit(),
+                );
             }
         }
     }

@@ -1,9 +1,17 @@
 use std::collections::HashSet;
 
-use skrifa::{outline::ExportedHintPlan, raw::TableProvider, GlyphId};
+use skrifa::{
+    outline::autohint::{Dimension, GlyphStyle, PointAction, TopoFlags},
+    raw::TableProvider,
+    GlyphId,
+};
 use write_fonts::{tables::gvar::Tent, types::F2Dot14};
 
-use crate::{font::Font, style::StyleIndex, AutohintError};
+use crate::{
+    font::Font,
+    glyf::{Action, ExportedHintPlan},
+    AutohintError,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SegmentSig {
@@ -18,14 +26,14 @@ struct EdgeSig {
     first_ix: u16,
     serif_ix: u16,
     blue_ix: u16,
-    flags: u8,
+    flags: TopoFlags,
     blue_is_shoot: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RecordSig {
-    dim: u8,
-    action: u32,
+    dim: Dimension,
+    action: Action,
     point_ix: u16,
     edge_ix: u16,
     edge2_ix: u16,
@@ -91,17 +99,19 @@ impl HintPlanDivergenceMetrics {
     }
 }
 
-fn round_bit(flags: u8) -> bool {
-    const TA_EDGE_ROUND: u8 = 1 << 0;
-    (flags & TA_EDGE_ROUND) != 0
+fn round_bit(flags: TopoFlags) -> bool {
+    flags.contains(TopoFlags::ROUND)
 }
 
-fn is_point_ip_action(action: u32) -> bool {
-    action == 2 || action == 3
+fn is_point_ip_action(action: Action) -> bool {
+    matches!(
+        action,
+        Action::Point(PointAction::IpOn) | Action::Point(PointAction::IpBetween)
+    )
 }
 
-fn is_on_between_swap(lhs: u32, rhs: u32) -> bool {
-    (lhs == 2 && rhs == 3) || (lhs == 3 && rhs == 2)
+fn is_on_between_swap(lhs: Action, rhs: Action) -> bool {
+    matches!((lhs, rhs), (Action::Point(p1), Action::Point(p2)) if (p1 == PointAction::IpOn && p2 == PointAction::IpBetween) || (p1 == PointAction::IpBetween && p2 == PointAction::IpOn))
 }
 
 fn remap_idx(idx: u16, map: &[u16]) -> u16 {
@@ -135,7 +145,7 @@ fn hint_plan_signature(plan: &ExportedHintPlan) -> HintPlanSignature {
         let edge = &plan.edges[idx];
         (
             remap_idx(edge.first_ix, &segment_map),
-            edge.flags,
+            edge.flags.to_bits(),
             edge.blue_ix,
             edge.blue_is_shoot != 0,
             edge.serif_ix,
@@ -180,7 +190,7 @@ fn hint_plan_signature(plan: &ExportedHintPlan) -> HintPlanSignature {
         .iter()
         .map(|rec| RecordSig {
             dim: rec.dim,
-            action: rec.action as u32,
+            action: rec.action,
             point_ix: rec.point_ix,
             edge_ix: remap_idx(rec.edge_ix, &edge_map),
             edge2_ix: remap_idx(rec.edge2_ix, &edge_map),
@@ -282,7 +292,7 @@ fn hint_plan_divergence_details(base: &HintPlanSignature, other: &HintPlanSignat
     for (idx, (base_edge, other_edge)) in base.edges.iter().zip(other.edges.iter()).enumerate() {
         if base_edge != other_edge {
             details.push_str(&format!(
-                "\n  Edge {}: base={{first_ix:{}, flags:{}, blue_ix:{}}} vs other={{first_ix:{}, flags:{}, blue_ix:{}}}",
+                "\n  Edge {}: base={{first_ix:{}, flags:{:?}, blue_ix:{}}} vs other={{first_ix:{}, flags:{:?}, blue_ix:{}}}",
                 idx,
                 base_edge.first_ix,
                 base_edge.flags,
@@ -297,7 +307,7 @@ fn hint_plan_divergence_details(base: &HintPlanSignature, other: &HintPlanSignat
     for (idx, (base_rec, other_rec)) in base.records.iter().zip(other.records.iter()).enumerate() {
         if base_rec.dim != other_rec.dim || base_rec.action != other_rec.action {
             details.push_str(&format!(
-                "\n  Record {} OPCODE mismatch: base action={} vs other action={}",
+                "\n  Record {} OPCODE mismatch: base action={:?} vs other action={:?}",
                 idx, base_rec.action, other_rec.action
             ));
             if base_rec.action != other_rec.action {
@@ -308,7 +318,7 @@ fn hint_plan_divergence_details(base: &HintPlanSignature, other: &HintPlanSignat
             }
         } else if base_rec != other_rec {
             details.push_str(&format!(
-                "\n  Record {} operand mismatch (action {}): base={{edge:{}, edge2:{}, lower:{}, upper:{}}} vs other={{edge:{}, edge2:{}, lower:{}, upper:{}}}",
+                "\n  Record {} operand mismatch (action {:?}): base={{edge:{}, edge2:{}, lower:{}, upper:{}}} vs other={{edge:{}, edge2:{}, lower:{}, upper:{}}}",
                 idx,
                 base_rec.action,
                 base_rec.edge_ix,
@@ -329,9 +339,7 @@ fn hint_plan_divergence_details(base: &HintPlanSignature, other: &HintPlanSignat
 pub(crate) fn has_stable_hint_plan_across_variations(
     font: &Font,
     glyph_idx: GlyphId,
-    ta_style: StyleIndex,
-    is_non_base: bool,
-    is_digit: bool,
+    glyph_style: GlyphStyle,
 ) -> Result<bool, AutohintError> {
     let locations = glyph_variations(font, glyph_idx)?;
     if locations.is_empty() {
@@ -339,27 +347,13 @@ pub(crate) fn has_stable_hint_plan_across_variations(
     }
 
     for size in font.args.hinting_range_min..=font.args.hinting_range_max {
-        let default_plan = crate::glyf::compute_hint_plan(
-            font,
-            glyph_idx,
-            ta_style.as_usize(),
-            is_non_base as u8,
-            is_digit as u8,
-            size as u16,
-            &[],
-        )?;
+        let default_plan =
+            crate::glyf::compute_hint_plan(font, glyph_idx, glyph_style, size as u16, &[])?;
         let default_sig = hint_plan_signature(&default_plan);
 
         for coords in &locations {
-            let var_plan = crate::glyf::compute_hint_plan(
-                font,
-                glyph_idx,
-                ta_style.as_usize(),
-                is_non_base as u8,
-                is_digit as u8,
-                size as u16,
-                coords,
-            )?;
+            let var_plan =
+                crate::glyf::compute_hint_plan(font, glyph_idx, glyph_style, size as u16, coords)?;
             let var_sig = hint_plan_signature(&var_plan);
             let metrics = hint_plan_divergence_metrics(&default_sig, &var_sig);
             if metrics.total_score() != 0 {

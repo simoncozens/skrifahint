@@ -1,6 +1,6 @@
-use skrifa::GlyphId;
+use skrifa::{outline::autohint::GlyphStyle, GlyphId};
 
-use crate::{font::Font, intset::IntSet, style::GlyphStyle, AutohintError};
+use crate::{font::Font, intset::IntSet, AutohintError};
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone)]
@@ -173,10 +173,10 @@ pub(crate) fn control_apply_coverage(font: &mut Font) {
         }
 
         // Apply the style override while preserving the is_digit flag
-        glyph_styles[glyph_idx] = GlyphStyle::new(
+        glyph_styles[glyph_idx] = GlyphStyle::from_raw_parts(
             style,
-            glyph_styles[glyph_idx].is_digit,
-            glyph_styles[glyph_idx].is_non_base,
+            glyph_styles[glyph_idx].is_non_base(),
+            glyph_styles[glyph_idx].is_digit(),
         );
     }
 }

@@ -1,4 +1,4 @@
-use skrifa::Tag;
+use skrifa::{outline::autohint::GlyphStyle, Tag};
 
 use crate::{
     control::{parse_control_entries, NumberSetAst, NumberSetElem},
@@ -87,7 +87,7 @@ pub fn autohint(args: &Args) -> Result<Vec<u8>, AutohintError> {
         return Err(AutohintError::FontAlreadyProcessed);
     }
 
-    font.glyph_styles = vec![crate::style::GlyphStyle::unassigned(); font.glyph_count as usize];
+    font.glyph_styles = vec![GlyphStyle::default(); font.glyph_count as usize];
 
     crate::control_index::control_build_tree(&mut font)?;
 

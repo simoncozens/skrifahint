@@ -1,4 +1,4 @@
-use skrifa::outline::SCRIPT_CLASSES;
+use skrifa::outline::autohint::SCRIPT_CLASSES;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScriptClassIndex(usize);

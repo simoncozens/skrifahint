@@ -8,11 +8,14 @@ use crate::{
     font::Font,
     opcodes::{CvtLocations, ADD, PUSHB_2, PUSHB_3, RCVT, WCVTP},
     recorder::build_glyph_instructions,
-    style::{GlyphStyle, StyleIndex, STYLE_INDEX_UNASSIGNED},
+    style::{StyleIndex, STYLE_INDEX_UNASSIGNED},
 };
 use indexmap::IndexMap;
 use skrifa::{
-    outline::{compute_hint_plan_exported, ExportedHintPlan, STYLE_CLASSES},
+    outline::{
+        autohint::{Dimension, EdgeAction, GlyphStyle, PointAction, TopoFlags, STYLE_CLASSES},
+        SmoothMode,
+    },
     prelude::*,
     raw::{tables::glyf::CurvePoint, FontData, FontRead, ReadError, TableProvider},
     GlyphId, MetadataProvider, Tag,
@@ -769,28 +772,235 @@ fn build_glyphs(
     })
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct ExportedHintRecord {
+    pub action: Action,
+    pub dim: Dimension,
+    pub point_ix: u16,
+    pub edge_ix: u16,
+    pub edge2_ix: u16,
+    pub edge3_ix: u16,
+    pub lower_bound_ix: u16,
+    pub upper_bound_ix: u16,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct ExportedHintSegment {
+    pub flags: TopoFlags,
+    pub dir: i8,
+    pub pos: i16,
+    pub delta: i16,
+    pub min_coord: i16,
+    pub max_coord: i16,
+    pub height: i16,
+    pub score: i32,
+    pub len: i32,
+    pub link_ix: u16,
+    pub serif_ix: u16,
+    pub first_ix: u16,
+    pub last_ix: u16,
+    pub edge_ix: u16,
+    pub edge_next_ix: u16,
+}
+
+impl ExportedHintSegment {
+    fn from_skrifa(segment: &skrifa::outline::autohint::Segment) -> Self {
+        Self {
+            flags: segment.flags(),
+            dir: segment.direction() as i8,
+            pos: segment.position(),
+            delta: segment.delta(),
+            min_coord: segment.min_coord(),
+            max_coord: segment.max_coord(),
+            height: segment.height(),
+            score: segment.score(),
+            len: segment.length(),
+            link_ix: segment.link_index().unwrap_or(u16::MAX),
+            serif_ix: segment.serif_index().unwrap_or(u16::MAX),
+            first_ix: segment.point_indices().0,
+            last_ix: segment.point_indices().1,
+            edge_ix: segment.edge_index().unwrap_or(u16::MAX),
+            edge_next_ix: segment.next_in_edge_index().unwrap_or(u16::MAX),
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct ExportedHintEdge {
+    pub fpos: i16,
+    pub opos: i32,
+    pub pos: i32,
+    pub flags: TopoFlags,
+    pub dir: i8,
+    pub link_ix: u16,
+    pub serif_ix: u16,
+    pub scale: i32,
+    pub first_ix: u16,
+    pub last_ix: u16,
+    pub has_blue: u8,
+    pub blue_scaled: i32,
+    pub blue_fitted: i32,
+    pub blue_ix: u16,
+    pub blue_is_shoot: u8,
+}
+
+impl ExportedHintEdge {
+    fn from_skrifa(edge: &skrifa::outline::autohint::Edge) -> Self {
+        let (has_blue, blue_scaled, blue_fitted) = if let Some(blue) = edge.blue_edge() {
+            (1, blue.scaled, blue.fitted)
+        } else {
+            (0, 0, 0)
+        };
+        let (blue_ix, blue_is_shoot) = if let Some(blue) = edge.blue_provenance() {
+            (blue.index, u8::from(blue.is_shoot))
+        } else {
+            (u16::MAX, 0)
+        };
+        Self {
+            fpos: edge.original_position(),
+            opos: edge.scaled_position(),
+            pos: edge.position(),
+            flags: edge.flags(),
+            dir: edge.direction() as i8,
+            link_ix: edge.link_index().unwrap_or(u16::MAX),
+            serif_ix: edge.serif_index().unwrap_or(u16::MAX),
+            scale: edge.scale(),
+            first_ix: edge.segment_indices().0,
+            last_ix: edge.segment_indices().1,
+            has_blue,
+            blue_scaled,
+            blue_fitted,
+            blue_ix,
+            blue_is_shoot,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct ExportedHintPlan {
+    pub records: Vec<ExportedHintRecord>,
+    pub segments: Vec<ExportedHintSegment>,
+    pub edges: Vec<ExportedHintEdge>,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Action {
+    Edge(EdgeAction),
+    Point(PointAction),
+}
+
+impl Action {
+    pub(crate) fn to_opcode(self) -> u8 {
+        const TA_BLUE: u8 = 4;
+        const TA_BLUE_ANCHOR: u8 = 5;
+        const TA_ANCHOR: u8 = 6;
+        const TA_ADJUST: u8 = 10;
+        const TA_LINK: u8 = 22;
+        const TA_STEM: u8 = 26;
+        const TA_SERIF: u8 = 38;
+        const TA_SERIF_ANCHOR: u8 = 45;
+        const TA_SERIF_LINK1: u8 = 52;
+        const TA_SERIF_LINK2: u8 = 59;
+        const TA_BOUND: u8 = 66;
+        match self {
+            Action::Edge(ea) => match ea {
+                EdgeAction::Adjust => TA_ADJUST,
+                EdgeAction::Blue => TA_BLUE,
+                EdgeAction::BlueAnchor => TA_BLUE_ANCHOR,
+                EdgeAction::Link => TA_LINK,
+                EdgeAction::Serif => TA_SERIF,
+                EdgeAction::SerifAnchor => TA_SERIF_ANCHOR,
+                EdgeAction::SerifLink1 => TA_SERIF_LINK1,
+                EdgeAction::SerifLink2 => TA_SERIF_LINK2,
+                EdgeAction::Anchor => TA_ANCHOR,
+                EdgeAction::Stem => TA_STEM,
+                EdgeAction::Bound => TA_BOUND,
+            },
+            Action::Point(pa) => match pa {
+                PointAction::IpBefore => 0,
+                PointAction::IpAfter => 1,
+                PointAction::IpOn => 2,
+                PointAction::IpBetween => 3,
+            },
+        }
+    }
+}
+
+impl ExportedHintPlan {
+    fn from_skrifa(skrifa_plan: &skrifa::outline::autohint::HintPlan) -> Self {
+        let mut plan = Self::default();
+        if let Some(vertical_axis) = skrifa_plan.vertical_axis() {
+            plan.segments.extend(
+                vertical_axis
+                    .segments()
+                    .iter()
+                    .map(ExportedHintSegment::from_skrifa),
+            );
+            plan.edges.extend(
+                vertical_axis
+                    .edges()
+                    .iter()
+                    .map(ExportedHintEdge::from_skrifa),
+            );
+        }
+        for action in skrifa_plan.actions() {
+            use skrifa::outline::autohint::{Dimension, HintAction};
+            match action {
+                HintAction::Point(point) => {
+                    if point.dimension == Dimension::Horizontal {
+                        continue;
+                    }
+                    plan.records.push(ExportedHintRecord {
+                        action: Action::Point(point.action),
+                        dim: point.dimension,
+                        point_ix: point.point_index,
+                        edge_ix: point.edge_index.unwrap_or(u16::MAX),
+                        edge2_ix: point.edge2_index.unwrap_or(u16::MAX),
+                        edge3_ix: u16::MAX,
+                        lower_bound_ix: u16::MAX,
+                        upper_bound_ix: u16::MAX,
+                    });
+                }
+                HintAction::Edge(edge) => {
+                    if edge.dimension == Dimension::Horizontal {
+                        continue;
+                    }
+                    plan.records.push(ExportedHintRecord {
+                        action: Action::Edge(edge.action),
+                        dim: edge.dimension,
+                        point_ix: u16::MAX,
+                        edge_ix: edge.edge_index,
+                        edge2_ix: edge.edge2_index.unwrap_or(u16::MAX),
+                        edge3_ix: edge.edge3_index.unwrap_or(u16::MAX),
+                        lower_bound_ix: edge.lower_bound_index.unwrap_or(u16::MAX),
+                        upper_bound_ix: edge.upper_bound_index.unwrap_or(u16::MAX),
+                    });
+                }
+            }
+        }
+        plan
+    }
+}
+
 pub(crate) fn compute_hint_plan(
     font: &Font,
     glyph_id: GlyphId,
-    style_index: usize,
-    is_non_base: u8,
-    is_digit: u8,
+    glyph_style: GlyphStyle,
     ppem: u16,
     coords: &[F2Dot14],
 ) -> Result<ExportedHintPlan, AutohintError> {
-    let Some(plan) = compute_hint_plan_exported(
+    let Ok(plan) = skrifa::outline::autohint::HintPlan::new(
         &font.fontref,
         coords,
-        glyph_id.to_u32(),
-        style_index,
-        is_non_base != 0,
-        is_digit != 0,
         ppem as f32,
+        SmoothMode::Normal.into(),
+        glyph_id,
+        glyph_style,
     ) else {
         return Err(AutohintError::HintPlanUnavailable);
     };
 
-    Ok(plan)
+    Ok(ExportedHintPlan::from_skrifa(&plan))
 }
 
 // ── Serialization: glyf/loca table building ──────────────────────────────────
@@ -896,8 +1106,11 @@ pub(crate) fn adjust_coverage(font: &mut Font) {
 
     for style_bits in data_ref.master_glyph_styles.iter_mut() {
         if style_bits.is_unassigned() {
-            *style_bits =
-                GlyphStyle::new(fallback_style, style_bits.is_digit, style_bits.is_non_base);
+            *style_bits = GlyphStyle::from_raw_parts(
+                fallback_style,
+                style_bits.is_non_base(),
+                style_bits.is_digit(),
+            );
         }
     }
 

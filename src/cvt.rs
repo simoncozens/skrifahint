@@ -10,7 +10,7 @@ use crate::{
 };
 use indexmap::IndexMap;
 use skrifa::{
-    outline::{compute_unscaled_style_metrics_exported, STYLE_CLASSES},
+    outline::autohint::{BlueZones, GlyphStyle, UnscaledStyleMetrics, STYLE_CLASSES},
     raw::TableProvider,
     GlyphId,
 };
@@ -46,38 +46,42 @@ fn compute_style_metrics(
         return Err(AutohintError::InvalidTable);
     };
 
-    let metrics = compute_unscaled_style_metrics_exported(&font.fontref, coords, style_class);
+    let metrics = UnscaledStyleMetrics::new(&font.fontref, coords, style_class);
 
-    let mut hwidths = Vec::with_capacity(metrics.horizontal_widths.len());
-    for &w in &metrics.horizontal_widths {
+    let mut hwidths = Vec::with_capacity(metrics.horizontal_metrics().widths().len());
+    for &w in metrics.horizontal_metrics().widths() {
         let Ok(w) = checked_i32_to_u16(w) else {
             return Err(AutohintError::NumericOverflow);
         };
         hwidths.push(w);
     }
 
-    let mut vwidths = Vec::with_capacity(metrics.vertical_widths.len());
-    for &w in &metrics.vertical_widths {
+    let mut vwidths = Vec::with_capacity(metrics.vertical_metrics().widths().len());
+    for &w in metrics.vertical_metrics().widths() {
         let Ok(w) = checked_i32_to_u16(w) else {
             return Err(AutohintError::NumericOverflow);
         };
         vwidths.push(w);
     }
+    let blues = metrics.vertical_metrics().blues();
+    let mut blue_refs = Vec::with_capacity(blues.len());
+    let mut blue_shoots = Vec::with_capacity(blues.len());
+    let mut blue_adjustment = Vec::with_capacity(blues.len());
 
-    let mut blue_refs = Vec::with_capacity(metrics.blues.len());
-    let mut blue_shoots = Vec::with_capacity(metrics.blues.len());
-    let mut blue_adjustment = Vec::with_capacity(metrics.blues.len());
-
-    for blue in &metrics.blues {
-        let Ok(reference) = checked_i32_to_u16(blue.reference) else {
+    for blue in blues {
+        let Ok(reference) = checked_i32_to_u16(blue.position) else {
             return Err(AutohintError::NumericOverflow);
         };
-        let Ok(shoot) = checked_i32_to_u16(blue.shoot) else {
+        let Ok(shoot) = checked_i32_to_u16(blue.overshoot) else {
             return Err(AutohintError::NumericOverflow);
         };
         blue_refs.push(reference);
         blue_shoots.push(shoot);
-        blue_adjustment.push(if blue.is_adjustment { 1 } else { 0 });
+        blue_adjustment.push(if blue.zones.contains(BlueZones::ADJUSTMENT) {
+            1
+        } else {
+            0
+        });
     }
 
     Ok(StyleMetrics {
@@ -109,8 +113,12 @@ fn replace_style_with_fallback(font: &mut Font, style_idx: usize, fallback_style
     }
 
     for glyph_style in font.glyph_styles.iter_mut() {
-        if glyph_style.style_index as usize == style_idx {
-            glyph_style.style_index = fallback_style;
+        if glyph_style.style_index().map(|i| i as usize) == Some(style_idx) {
+            *glyph_style = GlyphStyle::from_raw_parts(
+                fallback_style,
+                glyph_style.is_non_base(),
+                glyph_style.is_digit(),
+            );
         }
     }
 }

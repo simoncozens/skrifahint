@@ -1,5 +1,7 @@
 use indexmap::IndexMap;
-use skrifa::{raw::TableProvider, FontRef, GlyphId, GlyphNames, Tag};
+use skrifa::{
+    outline::autohint::GlyphStyle, raw::TableProvider, FontRef, GlyphId, GlyphNames, Tag,
+};
 use write_fonts::{
     from_obj::ToOwnedTable as _,
     tables::{
@@ -70,7 +72,7 @@ pub(crate) struct Font<'a> {
     pub(crate) reference_buf: Option<Vec<u8>>,
 
     pub(crate) glyph_count: i64,
-    pub(crate) glyph_styles: Vec<crate::style::GlyphStyle>,
+    pub(crate) glyph_styles: Vec<GlyphStyle>,
     pub(crate) sample_glyphs: IndexMap<StyleIndex, GlyphId>,
     pub(crate) increase_x_height: u32,
     pub(crate) glyf_data: Option<GlyfData>,

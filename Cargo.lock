@@ -612,9 +612,9 @@ checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "skrifa"
-version = "0.43.1"
+version = "0.43.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b17862a69012d5affd43fe184c71b652a128c8b00dce4a3657f5039df11d4a9"
+checksum = "4cbe997d0f2480442d727488fbe2150779114cbe480ecdbadef58b33e0318ffb"
 dependencies = [
  "bytemuck",
  "read-fonts",

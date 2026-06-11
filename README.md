@@ -6,15 +6,10 @@ It supports the `ttfautohint` command-line interface and control file mechanism.
 
 ## Installing and using
 
-Tilvisan is unpublished as of now. If you have `rustup` or a Rust toolchain installed, you can build it from source using Cargo:
+You can install Tilvisan in two ways:
 
-```bash
-cargo install --git https://github.com/simoncozens/tilvisan
-```
-
-(If you need to install rustup, you can find instructions at https://rustup.rs/.)
-
-Alternatively, you can grab the latest build by clicking on the `Actions` tab and downloading the latest artifact from the most recent green workflow run. At the bottom of the page linked from that workflow run, you should see a section called "Artifacts" with a link to download the latest build for Apple Silicon, Apple x86, Linux or Windows.
+* From binary: Download the latest release from https://github.com/simoncozens/tilvisan/releases or use [`cargo binstall`](https://github.com/cargo-bins/cargo-binstall)
+* From source: If you have a rust installation already, use `cargo install tilvisan`. If not, go to https://rustup.rs to get one!
 
 Using `tilvisan` should be very familiar to users of `ttfautohint`. The command-line interface is the same, and the control file mechanism is also supported. You can run `tilvisan --help` to see a full list of options. The most basic usage:
 

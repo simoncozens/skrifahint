@@ -547,6 +547,7 @@ fn run_font_through_scaler(font: &mut Font) -> Result<Vec<ScaledGlyph>, Autohint
                         contours,
                         bbox: Bbox::default(),
                         instructions: vec![],
+                        overlaps: false,
                     };
                     sg.recompute_bounding_box();
                     WriteGlyph::Simple(sg)
@@ -734,6 +735,7 @@ fn add_ttfautohint_glyph(glyphs: &mut Vec<ScaledGlyph>) {
         contours: vec![contour],
         bbox: Bbox::default(),
         instructions: TTFAUTOHINT_GLYPH_BYTECODE.to_vec(),
+        overlaps: false,
     };
     let marker_glyph = ScaledGlyph::with_glyf(WriteGlyph::Simple(simple_glyph));
     glyphs.push(marker_glyph);

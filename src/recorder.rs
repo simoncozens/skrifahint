@@ -78,6 +78,18 @@ fn log_debug_heading(label: &str, underline_char: char) {
     log::debug!("{label}\n{underline}\n\n");
 }
 
+fn debug_bytecode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(bytes.len() * 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 {
+            s.push(' ');
+        }
+        let _ = write!(s, "{b:02X}");
+    }
+    s
+}
+
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 struct RecorderOnPoint {
     edge: u16,
@@ -906,6 +918,7 @@ fn hints_recorder_marshal_and_emit_action(
     cvt_blue_refs_offset: u16,
     cvt_blue_shoots_offset: u16,
     top_to_bottom_hinting: bool,
+    debug: bool,
 ) -> Result<Bytecode, AutohintError> {
     let Some(m) = marshal_action_fields(
         recorder,
@@ -919,6 +932,12 @@ fn hints_recorder_marshal_and_emit_action(
         cvt_blue_shoots_offset,
     ) else {
         // Keep C behavior: unsupported actions emit nothing and are not an error.
+        if debug {
+            log::debug!(
+                "    marshal: unsupported action {:?}, emitting nothing",
+                action
+            );
+        }
         return Ok(Bytecode::new());
     };
 
@@ -959,6 +978,22 @@ fn hints_recorder_marshal_and_emit_action(
     );
     let wraps = &recorder.wrap_around_segments[..wraps_len];
 
+    if debug {
+        log::debug!(
+            "    marshal {:?}: edge1_first={} edge2_first={} edge3_first={} cvt={} round={} serif={} segs1={:?} segs2={:?} wraps={:?}",
+            action,
+            m.edge1_first_idx,
+            m.edge2_first_idx,
+            m.edge3_first_idx,
+            m.cvt_idx,
+            m.primary_is_round,
+            m.secondary_is_serif,
+            segment_indices1,
+            segment_indices2,
+            wraps
+        );
+    }
+
     let num_segments = recorder.get_segment_map_entry(recorder.replay_axis_num_segments);
 
     let emitted = emit_marshaled_action_bytes(
@@ -985,8 +1020,26 @@ fn recorder_replay_process_hint_record(
     cvt_blue_refs_offset: u16,
     cvt_blue_shoots_offset: u16,
     top_to_bottom_hinting: bool,
+    debug: bool,
 ) -> Result<ReplayProcessResult, AutohintError> {
+    if debug {
+        log::debug!(
+            "  record {:?} dim={:?} point={} edge={} edge2={} edge3={} lower={} upper={}",
+            rec.action,
+            rec.dim,
+            rec.point_ix,
+            rec.edge_ix,
+            rec.edge2_ix,
+            rec.edge3_ix,
+            rec.lower_bound_ix,
+            rec.upper_bound_ix
+        );
+    }
+
     if rec.dim != Dimension::Vertical {
+        if debug {
+            log::debug!("    -> skipped: dimension is not vertical");
+        }
         return Ok(ReplayProcessResult {
             bytecode: Bytecode::new(),
             did_emit_action: false,
@@ -1055,7 +1108,27 @@ fn recorder_replay_process_hint_record(
             });
         }
         Action::Edge(EdgeAction::Blue) => {
+            // A Blue action has no second edge: the emitted bytecode is
+            // [action][cvt_idx][edge1_first_idx] plus the segment payload.
+            if !edge_valid {
+                if debug {
+                    log::debug!(
+                        "    -> skipped: Blue action needs a valid edge (edge_valid={edge_valid})"
+                    );
+                }
+                return Ok(ReplayProcessResult {
+                    bytecode: Bytecode::new(),
+                    did_emit_action: false,
+                });
+            }
+        }
+        Action::Edge(EdgeAction::BlueAnchor) => {
             if !edge_valid || !edge2_valid {
+                if debug {
+                    log::debug!(
+                        "    -> skipped: BlueAnchor action needs valid edge and edge2 (edge_valid={edge_valid}, edge2_valid={edge2_valid})"
+                    );
+                }
                 return Ok(ReplayProcessResult {
                     bytecode: Bytecode::new(),
                     did_emit_action: false,
@@ -1067,6 +1140,12 @@ fn recorder_replay_process_hint_record(
         | Action::Edge(EdgeAction::Link)
         | Action::Edge(EdgeAction::Stem) => {
             if !edge_valid || !edge2_valid {
+                if debug {
+                    log::debug!(
+                        "    -> skipped: {:?} needs valid edge and edge2 (edge_valid={edge_valid}, edge2_valid={edge2_valid})",
+                        rec.action
+                    );
+                }
                 return Ok(ReplayProcessResult {
                     bytecode: Bytecode::new(),
                     did_emit_action: false,
@@ -1077,6 +1156,12 @@ fn recorder_replay_process_hint_record(
         | Action::Edge(EdgeAction::SerifAnchor)
         | Action::Edge(EdgeAction::SerifLink2) => {
             if !edge_valid {
+                if debug {
+                    log::debug!(
+                        "    -> skipped: {:?} needs valid edge (edge_valid={edge_valid})",
+                        rec.action
+                    );
+                }
                 return Ok(ReplayProcessResult {
                     bytecode: Bytecode::new(),
                     did_emit_action: false,
@@ -1085,6 +1170,11 @@ fn recorder_replay_process_hint_record(
         }
         Action::Edge(EdgeAction::SerifLink1) => {
             if !edge_valid || !edge2_valid || !edge3_valid {
+                if debug {
+                    log::debug!(
+                        "    -> skipped: SerifLink1 needs valid edge, edge2 and edge3 (edge_valid={edge_valid}, edge2_valid={edge2_valid}, edge3_valid={edge3_valid})"
+                    );
+                }
                 return Ok(ReplayProcessResult {
                     bytecode: Bytecode::new(),
                     did_emit_action: false,
@@ -1092,12 +1182,9 @@ fn recorder_replay_process_hint_record(
             }
         }
         Action::Edge(EdgeAction::Bound) => {
-            return Ok(ReplayProcessResult {
-                bytecode: Bytecode::new(),
-                did_emit_action: false,
-            });
-        }
-        _ => {
+            if debug {
+                log::debug!("    -> skipped: Bound action emits nothing");
+            }
             return Ok(ReplayProcessResult {
                 bytecode: Bytecode::new(),
                 did_emit_action: false,
@@ -1116,7 +1203,16 @@ fn recorder_replay_process_hint_record(
         cvt_blue_refs_offset,
         cvt_blue_shoots_offset,
         top_to_bottom_hinting,
+        debug,
     )?;
+
+    if debug {
+        log::debug!(
+            "    -> emitted {} bytes: {}",
+            emitted.len(),
+            debug_bytecode_hex(emitted.as_slice())
+        );
+    }
 
     Ok(ReplayProcessResult {
         bytecode: emitted,
@@ -1144,7 +1240,7 @@ fn recorder_record_hints_for_ppem(
 
     let rust_plan = crate::glyf::compute_hint_plan(font, glyph_idx, style, ppem, coords)?;
 
-    if !recorder_build_replay_axis_from_plan(recorder, &rust_plan) {
+    if !recorder_build_replay_axis_from_plan(recorder, &rust_plan, font.args.debug) {
         return Err(AutohintError::OutOfMemory);
     }
 
@@ -1164,6 +1260,7 @@ fn recorder_record_hints_for_ppem(
             cvt_blue_refs_offset,
             cvt_blue_shoots_offset,
             top_to_bottom_hinting,
+            font.args.debug,
         )?;
 
         if !result.bytecode.is_empty() {
@@ -1178,12 +1275,22 @@ fn recorder_record_hints_for_ppem(
         }
     }
 
+    if font.args.debug {
+        log::debug!(
+            "  ppem {ppem}: {} actions, {} record bytes: {}",
+            recorder.hints_record_num_actions,
+            recorder.hints_record_buffer.len(),
+            debug_bytecode_hex(recorder.hints_record_buffer.as_slice())
+        );
+    }
+
     Ok(())
 }
 
 fn recorder_build_replay_axis_from_plan(
     recorder: &mut RustRecorder,
     plan: &ExportedHintPlan,
+    debug: bool,
 ) -> bool {
     let segments_src = &plan.segments;
     let edges_src = &plan.edges;
@@ -1318,6 +1425,37 @@ fn recorder_build_replay_axis_from_plan(
         recorder.replay_edge_segment_indices = indices;
     }
 
+    if debug {
+        log::debug!(
+            "  replay axis: {} segments, {} edges",
+            num_segments,
+            num_edges
+        );
+        for (i, src) in segments_src.iter().enumerate() {
+            log::debug!(
+                "    segment {i}: points {}..{} edge={} next_in_edge={} flags={:?}",
+                src.first_ix,
+                src.last_ix,
+                src.edge_ix,
+                src.edge_next_ix,
+                src.flags
+            );
+        }
+        for (i, src) in edges_src.iter().enumerate() {
+            log::debug!(
+                "    edge {i}: first_seg={} last_seg={} pos={} flags={:?} blue={} blue_is_shoot={} link={} serif={}",
+                src.first_ix,
+                src.last_ix,
+                src.pos,
+                src.flags,
+                src.blue_ix,
+                src.blue_is_shoot,
+                src.link_ix,
+                src.serif_ix
+            );
+        }
+    }
+
     recorder.replay_axis_num_segments = num_segments as u16;
     recorder.replay_axis_num_edges = num_edges as u16;
     recorder.replay_axis_major_dir = TA_DIR_NONE;
@@ -1325,6 +1463,20 @@ fn recorder_build_replay_axis_from_plan(
 
     if !recorder.initialize_replay_segment_metadata() {
         return false;
+    }
+
+    if debug {
+        // The segment map is only populated by `initialize_replay_segment_metadata`,
+        // so the edge -> segment chains must be dumped after it runs.
+        for edge_idx in 0..num_edges {
+            let count = recorder.replay_edge_segment_index_count(edge_idx as u16);
+            let mut segs = Vec::new();
+            if count > 0 {
+                segs.resize(count, 0);
+                recorder.dump_replay_edge_segment_indices(edge_idx as u16, &mut segs);
+            }
+            log::debug!("    edge {edge_idx} segment chain: {segs:?}");
+        }
     }
 
     true

@@ -1801,7 +1801,6 @@ pub(crate) fn build_glyph_instructions(font: &mut Font, idx: GlyphId) -> Result<
 
     let ta_style =
         StyleIndex::new(gstyle.style_index().unwrap_or(STYLE_INDEX_UNASSIGNED) as usize)?;
-    let use_gstyle_data;
 
     let (is_composite_glyph, is_empty_glyph, glyph_num_points) =
         if let Ok(info) = LoaderGlyphInfo::new(font, idx) {
@@ -1848,6 +1847,9 @@ pub(crate) fn build_glyph_instructions(font: &mut Font, idx: GlyphId) -> Result<
 
     let use_fallback_scaler = unstable_variable_plan
         || (font.args.fallback_scaling && ta_style.as_usize() == fallback_style);
+
+    #[allow(clippy::needless_late_init)] // it's tidier
+    let use_gstyle_data;
 
     if is_composite_glyph {
         let subglyph = match build_subglyph_shifter_bytecode(font, idx) {
